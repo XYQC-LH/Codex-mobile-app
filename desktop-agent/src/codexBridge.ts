@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { once } from 'node:events';
 import type { Readable } from 'node:stream';
 import { WebSocket } from 'ws';
+import { loadAgentState, saveAgentState, type AgentState } from './agentConfig.js';
 
 type JsonRpcId = number;
 
@@ -48,7 +49,13 @@ export class CodexBridge extends EventEmitter {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
   }>();
-  private readonly threads = new Map<string, ThreadState>();
+  private readonly persistedState: AgentState = loadAgentState();
+  private readonly threads = new Map<string, ThreadState>(
+    Object.entries(this.persistedState.threads).map(([localSessionId, thread]) => [
+      localSessionId,
+      { threadId: thread.threadId, cwd: thread.cwd },
+    ]),
+  );
   private readonly activeTurns = new Map<string, {
     localSessionId: string;
     localTurnId: string;
@@ -151,7 +158,7 @@ export class CodexBridge extends EventEmitter {
 
   private async getOrCreateThread(localSessionId: string, cwd: string): Promise<ThreadState> {
     const existing = this.threads.get(localSessionId);
-    if (existing) {
+    if (existing?.cwd === cwd) {
       return existing;
     }
 
@@ -173,6 +180,11 @@ export class CodexBridge extends EventEmitter {
 
     const state = { threadId: thread.id, cwd };
     this.threads.set(localSessionId, state);
+    this.persistedState.threads[localSessionId] = {
+      ...state,
+      updatedAt: new Date().toISOString(),
+    };
+    saveAgentState(this.persistedState);
     return state;
   }
 

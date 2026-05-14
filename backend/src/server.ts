@@ -58,6 +58,14 @@ wss.on('connection', (socket) => {
       return;
     }
 
+    if (event.type === 'app.ping') {
+      send(socket, createEvent('app.pong', {
+        ping_id: event.payload.ping_id,
+        sent_at_ms: event.payload.sent_at_ms,
+      }, { user_id: client.userId }));
+      return;
+    }
+
     routeEvent(client, event);
   });
 

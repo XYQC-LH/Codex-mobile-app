@@ -18,6 +18,13 @@ export type WorkspaceSummary = {
   workspace_id: string;
   name: string;
   path_hint: string;
+  sessions?: SessionSummary[];
+};
+
+export type SessionSummary = {
+  session_id: string;
+  title: string;
+  updated_at?: string;
 };
 
 export function createEvent<TPayload>(

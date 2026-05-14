@@ -12,6 +12,19 @@ export type EventEnvelope<TPayload = Record<string, unknown>> = {
   payload: TPayload;
 };
 
+export type SessionSummary = {
+  session_id: string;
+  title: string;
+  updated_at?: string;
+};
+
+export type WorkspaceSummary = {
+  workspace_id: string;
+  name: string;
+  path_hint: string;
+  sessions?: SessionSummary[];
+};
+
 export function createEvent<TPayload>(
   type: string,
   payload: TPayload,

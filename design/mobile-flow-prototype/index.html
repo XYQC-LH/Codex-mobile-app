@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Codex Mobile Control Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef1f4;
+      --phone: #0e1116;
+      --screen: #f8fafc;
+      --text: #111827;
+      --muted: #667085;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --accent: #2563eb;
+      --accent-soft: #e8f0ff;
+      --green: #138a4b;
+      --green-soft: #e5f7ed;
+      --amber: #a05a00;
+      --amber-soft: #fff2d6;
+      --danger: #b42318;
+      --shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, #f4f6f8, #dfe5ec);
+      color: var(--text);
+      font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    .stage {
+      width: min(100vw, 1080px);
+      padding: 28px;
+      display: grid;
+      grid-template-columns: 390px minmax(260px, 1fr);
+      gap: 34px;
+      align-items: center;
+    }
+
+    .phone {
+      width: 390px;
+      height: 844px;
+      padding: 14px;
+      border-radius: 38px;
+      background: var(--phone);
+      box-shadow: var(--shadow);
+    }
+
+    .screen {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      border-radius: 28px;
+      background: var(--screen);
+    }
+
+    .statusbar {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #172033;
+      background: rgba(248, 250, 252, 0.92);
+    }
+
+    .status-icons {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #172033;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      display: inline-block;
+    }
+
+    .view {
+      display: none;
+      height: calc(100% - 36px);
+      grid-template-rows: auto 1fr;
+      background: var(--screen);
+    }
+
+    .view.active {
+      display: grid;
+    }
+
+    .top {
+      padding: 18px 18px 12px;
+      background: rgba(248, 250, 252, 0.96);
+      border-bottom: 1px solid rgba(217, 222, 231, 0.8);
+    }
+
+    .navline {
+      display: grid;
+      grid-template-columns: 38px 1fr auto;
+      align-items: center;
+      min-height: 40px;
+      gap: 8px;
+    }
+
+    .server-status {
+      min-width: 86px;
+      height: 34px;
+      border: 1px solid #b9e5ca;
+      border-radius: var(--radius);
+      padding: 4px 8px;
+      background: var(--green-soft);
+      color: var(--green);
+      display: grid;
+      align-content: center;
+      justify-items: end;
+      line-height: 1.05;
+      white-space: nowrap;
+    }
+
+    .server-status .label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .server-status .latency {
+      margin-top: 2px;
+      font-size: 10px;
+      font-weight: 750;
+      color: #256b45;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .icon-btn {
+      width: 38px;
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      color: #233044;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+    }
+
+    .icon-btn:active,
+    .primary:active,
+    .card:active {
+      transform: translateY(1px);
+    }
+
+    .title {
+      min-width: 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 4px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.2;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .sub {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .content {
+      overflow: auto;
+      padding: 14px 14px 18px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .card {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      background: var(--panel);
+      text-align: left;
+      color: inherit;
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+
+    .card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .name {
+      font-size: 16px;
+      font-weight: 750;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+
+    .path,
+    .meta {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .meta-row {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    .pill {
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #f2f4f7;
+      color: #344054;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .pill.online {
+      color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .pill.warn {
+      color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .pill.blue {
+      color: #174ea6;
+      background: var(--accent-soft);
+    }
+
+    .section-label {
+      margin: 18px 2px 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    .search {
+      margin-top: 14px;
+      height: 42px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 0 12px;
+      color: var(--text);
+      outline: none;
+    }
+
+    .primary {
+      width: 100%;
+      height: 46px;
+      border: 0;
+      border-radius: var(--radius);
+      background: var(--accent);
+      color: #fff;
+      font-weight: 750;
+      cursor: pointer;
+    }
+
+    .empty {
+      margin-top: 18px;
+      padding: 20px 16px;
+      border: 1px dashed #c7ceda;
+      border-radius: var(--radius);
+      background: #fff;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .console-view {
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .messages {
+      padding: 14px;
+      overflow: auto;
+      display: grid;
+      align-content: start;
+      gap: 10px;
+    }
+
+    .bubble {
+      max-width: 88%;
+      padding: 11px 12px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      line-height: 1.45;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .bubble.me {
+      justify-self: end;
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .composer {
+      display: grid;
+      grid-template-columns: 1fr 44px;
+      gap: 8px;
+      padding: 10px 12px 14px;
+      border-top: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .composer input {
+      height: 42px;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 0 11px;
+      outline: none;
+    }
+
+    .send {
+      width: 44px;
+      height: 42px;
+      border: 0;
+      border-radius: var(--radius);
+      background: var(--text);
+      color: #fff;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+    }
+
+    .notes {
+      align-self: stretch;
+      display: grid;
+      align-content: center;
+      gap: 16px;
+      color: #243041;
+    }
+
+    .notes h2 {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .notes p {
+      margin: 0;
+      max-width: 520px;
+      color: #526070;
+      font-size: 15px;
+      line-height: 1.7;
+    }
+
+    .flow {
+      display: grid;
+      gap: 8px;
+      max-width: 520px;
+    }
+
+    .flow-step {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid #ccd4df;
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.72);
+      font-size: 14px;
+    }
+
+    .number {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: #111827;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    @media (max-width: 860px) {
+      body {
+        display: block;
+      }
+
+      .stage {
+        width: 100%;
+        min-height: 100vh;
+        grid-template-columns: 1fr;
+        padding: 14px;
+      }
+
+      .phone {
+        width: min(390px, 100%);
+        height: min(844px, calc(100vh - 28px));
+        margin: 0 auto;
+      }
+
+      .notes {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="stage">
+    <section class="phone" aria-label="手机原型">
+      <div class="screen">
+        <div class="statusbar">
+          <span>21:36</span>
+          <span class="status-icons">
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span>82%</span>
+          </span>
+        </div>
+
+        <section class="view active" id="device-view">
+          <header class="top">
+            <div class="navline">
+              <span></span>
+              <div class="title">
+                <p class="eyebrow">Codex Mobile</p>
+                <h1>选择设备</h1>
+              </div>
+              <div class="actions">
+                <div class="server-status" aria-label="服务器通讯状态">
+                  <span class="label"><span class="dot"></span>服务器</span>
+                  <span class="latency">38ms</span>
+                </div>
+                <button class="icon-btn" type="button" title="刷新">↻</button>
+              </div>
+            </div>
+            <p class="sub">先选择一台电脑 Agent，再进入它的项目和会话。</p>
+          </header>
+
+          <div class="content">
+            <div class="stack">
+              <button class="card" type="button" data-go="project-view">
+                <div class="card-head">
+                  <div>
+                    <div class="name">Windows Dev Machine</div>
+                    <div class="path">dev_local · C:/Users/XYQC</div>
+                  </div>
+                  <span class="pill online"><span class="dot"></span>在线</span>
+                </div>
+                <div class="meta-row">
+                  <span class="pill blue">9 个项目</span>
+                  <span class="pill">1 个可续写会话</span>
+                  <span class="pill">刚刚同步</span>
+                </div>
+              </button>
+
+              <button class="card" type="button">
+                <div class="card-head">
+                  <div>
+                    <div class="name">MacBook Studio</div>
+                    <div class="path">未来设备占位</div>
+                  </div>
+                  <span class="pill warn">离线</span>
+                </div>
+                <div class="meta-row">
+                  <span class="pill">0 个项目</span>
+                  <span class="pill">等待 Agent 上线</span>
+                </div>
+              </button>
+            </div>
+
+            <div class="empty">
+              如果没有设备在线，这里只显示“等待电脑 Agent 上线”，不会再把项目和会话挤在同一屏。
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="project-view">
+          <header class="top">
+            <div class="navline">
+              <button class="icon-btn" type="button" data-go="device-view" title="返回">‹</button>
+              <div class="title">
+                <p class="eyebrow">Windows Dev Machine</p>
+                <h1>选择项目</h1>
+              </div>
+              <div class="actions">
+                <div class="server-status" aria-label="服务器通讯状态">
+                  <span class="label"><span class="dot"></span>服务器</span>
+                  <span class="latency">38ms</span>
+                </div>
+                <button class="icon-btn" type="button" title="刷新">↻</button>
+              </div>
+            </div>
+            <input class="search" placeholder="搜索项目名称或路径" />
+          </header>
+
+          <div class="content">
+            <div class="stack">
+              <button class="card" type="button" data-go="session-view">
+                <div class="card-head">
+                  <div>
+                    <div class="name">codex-mobile-control</div>
+                    <div class="path">C:/Users/XYQC/Downloads/codex-mobile-control</div>
+                  </div>
+                  <span class="pill online">当前</span>
+                </div>
+                <div class="meta-row">
+                  <span class="pill blue">App 原型</span>
+                  <span class="pill">0 个历史会话</span>
+                </div>
+              </button>
+
+              <button class="card" type="button" data-go="session-view">
+                <div class="card-head">
+                  <div>
+                    <div class="name">JILIGULU</div>
+                    <div class="path">C:/Users/XYQC/Downloads/JILIGULU</div>
+                  </div>
+                  <span class="pill blue">1 会话</span>
+                </div>
+                <div class="meta-row">
+                  <span class="pill">最近有历史记录</span>
+                  <span class="pill">可继续</span>
+                </div>
+              </button>
+
+              <button class="card" type="button" data-go="session-view">
+                <div class="card-head">
+                  <div>
+                    <div class="name">xianyu-auto</div>
+                    <div class="path">C:/Users/XYQC/Downloads/xianyu-auto</div>
+                  </div>
+                  <span class="pill">0 会话</span>
+                </div>
+                <div class="meta-row">
+                  <span class="pill">可新建</span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="session-view">
+          <header class="top">
+            <div class="navline">
+              <button class="icon-btn" type="button" data-go="project-view" title="返回">‹</button>
+              <div class="title">
+                <p class="eyebrow">Windows Dev Machine / JILIGULU</p>
+                <h1>选择会话</h1>
+              </div>
+              <div class="server-status" aria-label="服务器通讯状态">
+                <span class="label"><span class="dot"></span>服务器</span>
+                <span class="latency">38ms</span>
+              </div>
+            </div>
+          </header>
+
+          <div class="content">
+            <button class="primary" type="button" data-go="console-view">新建 Codex 会话</button>
+
+            <div class="section-label">历史会话</div>
+            <div class="stack">
+              <button class="card" type="button" data-go="console-view">
+                <div class="card-head">
+                  <div>
+                    <div class="name">审查兼容冗余组件路径太重问题的组件代码</div>
+                    <div class="meta">最近更新：今天 20:44</div>
+                  </div>
+                  <span class="pill online">可续写</span>
+                </div>
+                <div class="meta-row">
+                  <span class="pill blue">历史 session</span>
+                  <span class="pill">cwd 匹配</span>
+                </div>
+              </button>
+
+              <button class="card" type="button" data-go="console-view">
+                <div class="card-head">
+                  <div>
+                    <div class="name">新的移动端控制链路</div>
+                    <div class="meta">原型占位 · 实现后来自 Codex session index</div>
+                  </div>
+                  <span class="pill warn">待确认恢复</span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="view console-view" id="console-view">
+          <header class="top">
+            <div class="navline">
+              <button class="icon-btn" type="button" data-go="session-view" title="返回">‹</button>
+              <div class="title">
+                <p class="eyebrow">JILIGULU</p>
+                <h1>会话控制</h1>
+              </div>
+              <div class="server-status" aria-label="服务器通讯状态">
+                <span class="label"><span class="dot"></span>服务器</span>
+                <span class="latency">38ms</span>
+              </div>
+            </div>
+            <p class="sub">当前会话：审查兼容冗余组件路径太重问题的组件代码</p>
+          </header>
+
+          <div class="messages">
+            <div class="bubble">已连接 Windows Dev Machine。当前项目路径已锁定到 JILIGULU。</div>
+            <div class="bubble me">帮我继续检查这个会话里的问题。</div>
+            <div class="bubble">收到。这里会流式显示电脑端 Codex 的响应、工具状态和执行结果。</div>
+          </div>
+
+          <footer class="composer">
+            <input placeholder="输入给 Codex 的指令" />
+            <button class="send" type="button" title="发送">➤</button>
+          </footer>
+        </section>
+      </div>
+    </section>
+
+    <aside class="notes">
+      <h2>层层递进，而不是一屏塞满</h2>
+      <p>这个原型把选择成本拆开：先确认哪台电脑在线，再进入这台电脑的项目，最后才选择具体会话。服务器地址和 WebSocket 细节不出现在用户流程里。</p>
+      <div class="flow">
+        <div class="flow-step"><span class="number">1</span>设备选择：多电脑部署时的第一层入口</div>
+        <div class="flow-step"><span class="number">2</span>项目选择：只看当前设备里的 workspace</div>
+        <div class="flow-step"><span class="number">3</span>会话选择：新建或继续历史 session</div>
+        <div class="flow-step"><span class="number">4</span>会话控制：发消息、看状态、接收 Codex 输出</div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const views = Array.from(document.querySelectorAll(".view"));
+    const goTo = (id) => {
+      views.forEach((view) => view.classList.toggle("active", view.id === id));
+    };
+
+    document.querySelectorAll("[data-go]").forEach((button) => {
+      button.addEventListener("click", () => goTo(button.dataset.go));
+    });
+  </script>
+</body>
+</html>
