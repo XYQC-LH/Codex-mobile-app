@@ -1,0 +1,16 @@
+{
+  "name": "codex-mobile-control",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Three-end Codex mobile remote control prototype.",
+  "scripts": {
+    "build": "npm run build --workspace backend && npm run build --workspace desktop-agent",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:agent": "npm run dev --workspace desktop-agent",
+    "check": "npm run check --workspace backend && npm run check --workspace desktop-agent"
+  },
+  "workspaces": [
+    "backend",
+    "desktop-agent"
+  ]
+}
