@@ -45,7 +45,7 @@ export function loadAgentConfig(): AgentConfig {
   const config: AgentConfig = {
     backendWs: readString(process.env.CMC_BACKEND_WS)
       ?? readString(stored.backendWs)
-      ?? 'ws://127.0.0.1:8787/ws',
+      ?? 'ws://103.143.81.22:8787/ws',
     userId: readString(process.env.CMC_USER_ID)
       ?? readString(stored.userId)
       ?? 'usr_demo',

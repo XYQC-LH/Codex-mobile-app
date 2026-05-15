@@ -114,7 +114,7 @@ Desktop Agent 支持环境变量和本地配置文件。环境变量优先级更
 
 | 配置 | 含义 | 默认值 |
 |---|---|---|
-| `CMC_BACKEND_WS` | Backend WebSocket 地址 | `ws://127.0.0.1:8787/ws` |
+| `CMC_BACKEND_WS` | Backend WebSocket 地址 | `ws://103.143.81.22:8787/ws` |
 | `CMC_USER_ID` | 当前用户 ID | `usr_demo` |
 | `CMC_DEVICE_ID` | 当前设备 ID | 基于主机名生成 |
 | `CMC_DEVICE_NAME` | 设备展示名 | 当前主机名 |

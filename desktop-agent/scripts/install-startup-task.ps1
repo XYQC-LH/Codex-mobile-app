@@ -24,6 +24,10 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
+  -StartWhenAvailable `
+  -MultipleInstances IgnoreNew `
+  -RestartCount 999 `
+  -RestartInterval (New-TimeSpan -Minutes 1) `
   -ExecutionTimeLimit (New-TimeSpan -Days 365)
 
 Register-ScheduledTask `
