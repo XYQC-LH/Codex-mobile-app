@@ -36,7 +36,10 @@ class CodexMobileControlApp extends StatelessWidget {
   }
 }
 
-enum _HomeStep { devices, projects, sessions, console }
+enum _HomeStep { devices, projects, console }
+
+typedef SessionSelectionCallback =
+    void Function(String workspaceId, String sessionId);
 
 enum ConsoleLogRole { user, assistant, system }
 
@@ -91,6 +94,7 @@ class _ControlHomePageState extends State<ControlHomePage>
   String? _selectedDeviceId;
   String? _selectedWorkspaceId;
   String? _selectedSessionId;
+  final Set<String> _expandedWorkspaceIds = <String>{};
   final List<DeviceInfo> _devices = <DeviceInfo>[];
   final List<ConsoleLogEntry> _logs = <ConsoleLogEntry>[];
   ApprovalRequest? _pendingApproval;
@@ -185,13 +189,11 @@ class _ControlHomePageState extends State<ControlHomePage>
           ),
           _HomeStep.projects => _ProjectSelectionPage(
             device: selectedDevice,
-            onWorkspaceSelected: _openWorkspace,
-          ),
-          _HomeStep.sessions => _SessionSelectionPage(
-            device: selectedDevice,
-            workspace: selectedWorkspace,
+            expandedWorkspaceIds: _expandedWorkspaceIds,
+            selectedWorkspaceId: _selectedWorkspaceId,
             selectedSessionId: _selectedSessionId,
-            onCreateSession: _createSessionForSelectedWorkspace,
+            onWorkspaceToggled: _toggleWorkspaceExpanded,
+            onCreateSession: _createSessionForWorkspace,
             onSessionSelected: _openSession,
           ),
           _HomeStep.console => _ConsolePage(
@@ -219,7 +221,6 @@ class _ControlHomePageState extends State<ControlHomePage>
     return switch (_step) {
       _HomeStep.devices => '选择设备',
       _HomeStep.projects => '选择项目',
-      _HomeStep.sessions => '选择会话',
       _HomeStep.console => '会话控制',
     };
   }
@@ -244,12 +245,22 @@ class _ControlHomePageState extends State<ControlHomePage>
 
       setState(() {
         _step = _HomeStep.values.firstWhere(
-          (item) => item.name == stepName,
+          (item) =>
+              item.name == stepName ||
+              (stepName == 'sessions' && item == _HomeStep.projects),
           orElse: () => _HomeStep.devices,
         );
         _selectedDeviceId = json['selectedDeviceId']?.toString();
         _selectedWorkspaceId = json['selectedWorkspaceId']?.toString();
         _selectedSessionId = json['selectedSessionId']?.toString();
+        final expandedWorkspaceIds = json['expandedWorkspaceIds'];
+        _expandedWorkspaceIds
+          ..clear()
+          ..addAll(expandedWorkspaceIds is List
+              ? expandedWorkspaceIds
+                    .map((item) => item.toString())
+                    .where((item) => item.isNotEmpty)
+              : const <String>[]);
         _logs
           ..clear()
           ..addAll(logs is List
@@ -283,6 +294,7 @@ class _ControlHomePageState extends State<ControlHomePage>
         'selectedDeviceId': _selectedDeviceId,
         'selectedWorkspaceId': _selectedWorkspaceId,
         'selectedSessionId': _selectedSessionId,
+        'expandedWorkspaceIds': _expandedWorkspaceIds.toList(),
         'logs': _logs.take(80).map((item) => item.toJson()).toList(),
       }),
     );
@@ -455,8 +467,7 @@ class _ControlHomePageState extends State<ControlHomePage>
     setState(() {
       _step = switch (_step) {
         _HomeStep.projects => _HomeStep.devices,
-        _HomeStep.sessions => _HomeStep.projects,
-        _HomeStep.console => _HomeStep.sessions,
+        _HomeStep.console => _HomeStep.projects,
         _HomeStep.devices => _HomeStep.devices,
       };
     });
@@ -473,18 +484,23 @@ class _ControlHomePageState extends State<ControlHomePage>
     _schedulePersistUiState();
   }
 
-  void _openWorkspace(String workspaceId) {
+  void _toggleWorkspaceExpanded(String workspaceId) {
     setState(() {
       _selectedWorkspaceId = workspaceId;
-      _selectedSessionId = null;
-      _step = _HomeStep.sessions;
+      if (_expandedWorkspaceIds.contains(workspaceId)) {
+        _expandedWorkspaceIds.remove(workspaceId);
+      } else {
+        _expandedWorkspaceIds.add(workspaceId);
+      }
     });
     _schedulePersistUiState();
   }
 
-  void _openSession(String sessionId) {
+  void _openSession(String workspaceId, String sessionId) {
     setState(() {
+      _selectedWorkspaceId = workspaceId;
       _selectedSessionId = sessionId;
+      _expandedWorkspaceIds.add(workspaceId);
       _step = _HomeStep.console;
       _logs
         ..clear()
@@ -499,15 +515,12 @@ class _ControlHomePageState extends State<ControlHomePage>
     _requestSessionHistory(sessionId);
   }
 
-  void _createSessionForSelectedWorkspace() {
-    final workspaceId = _selectedWorkspaceId;
-    if (workspaceId == null) {
-      return;
-    }
-
+  void _createSessionForWorkspace(String workspaceId) {
     final sessionId = _newId('ses');
     setState(() {
+      _selectedWorkspaceId = workspaceId;
       _selectedSessionId = sessionId;
+      _expandedWorkspaceIds.add(workspaceId);
       _step = _HomeStep.console;
       _logs.clear();
       _loadingHistory = false;
@@ -652,6 +665,7 @@ class _ControlHomePageState extends State<ControlHomePage>
           ),
         );
 
+      _expandRunningWorkspaces();
       _reconcileSelectedContext();
     });
     _schedulePersistUiState();
@@ -667,6 +681,7 @@ class _ControlHomePageState extends State<ControlHomePage>
       } else {
         _devices.add(device);
       }
+      _expandRunningWorkspaces();
       _reconcileSelectedContext();
     });
     _schedulePersistUiState();
@@ -706,6 +721,7 @@ class _ControlHomePageState extends State<ControlHomePage>
             : null,
         lastStatusAt: lastStatusAt,
       );
+      _expandRunningWorkspaces();
     });
     _schedulePersistUiState();
   }
@@ -808,6 +824,16 @@ class _ControlHomePageState extends State<ControlHomePage>
     return _selectedWorkspace?.sessions
             .any((item) => item.sessionId == sessionId) ??
         false;
+  }
+
+  void _expandRunningWorkspaces() {
+    for (final device in _devices) {
+      for (final workspace in device.workspaces) {
+        if (workspace.runningSessionCount > 0) {
+          _expandedWorkspaceIds.add(workspace.workspaceId);
+        }
+      }
+    }
   }
 
   void _scrollToBottom({bool jump = false}) {
@@ -995,11 +1021,21 @@ class _DeviceSelectionPage extends StatelessWidget {
 class _ProjectSelectionPage extends StatelessWidget {
   const _ProjectSelectionPage({
     required this.device,
-    required this.onWorkspaceSelected,
+    required this.expandedWorkspaceIds,
+    required this.selectedWorkspaceId,
+    required this.selectedSessionId,
+    required this.onWorkspaceToggled,
+    required this.onCreateSession,
+    required this.onSessionSelected,
   });
 
   final DeviceInfo? device;
-  final ValueChanged<String> onWorkspaceSelected;
+  final Set<String> expandedWorkspaceIds;
+  final String? selectedWorkspaceId;
+  final String? selectedSessionId;
+  final ValueChanged<String> onWorkspaceToggled;
+  final ValueChanged<String> onCreateSession;
+  final SessionSelectionCallback onSessionSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -1034,93 +1070,20 @@ class _ProjectSelectionPage extends StatelessWidget {
         }
 
         final workspace = workspaces[index - 1];
-        return _InfoCard(
-          onTap: () => onWorkspaceSelected(workspace.workspaceId),
-          title: workspace.name,
-          subtitle: workspace.pathHint,
-          chips: [
-            '${workspace.sessions.length} 个历史会话',
-            workspace.sessions.isEmpty ? '可新建' : '可继续',
-          ],
+        final isExpanded = expandedWorkspaceIds.contains(workspace.workspaceId);
+        return _WorkspaceDrawerCard(
+          workspace: workspace,
+          expanded: isExpanded,
+          selected: workspace.workspaceId == selectedWorkspaceId,
+          selectedSessionId: selectedSessionId,
+          onToggle: () => onWorkspaceToggled(workspace.workspaceId),
+          onCreateSession: () => onCreateSession(workspace.workspaceId),
+          onSessionSelected: (sessionId) => onSessionSelected(
+            workspace.workspaceId,
+            sessionId,
+          ),
         );
       },
-    );
-  }
-}
-
-class _SessionSelectionPage extends StatelessWidget {
-  const _SessionSelectionPage({
-    required this.device,
-    required this.workspace,
-    required this.selectedSessionId,
-    required this.onCreateSession,
-    required this.onSessionSelected,
-  });
-
-  final DeviceInfo? device;
-  final WorkspaceInfo? workspace;
-  final String? selectedSessionId;
-  final VoidCallback onCreateSession;
-  final ValueChanged<String> onSessionSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    if (device == null || workspace == null) {
-      return const _EmptyState(
-        icon: Icons.folder_off_outlined,
-        title: '未选择项目',
-        subtitle: '请返回项目页重新选择。',
-      );
-    }
-
-    final sessions = workspace!.sessions;
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        _ContextHeader(
-          title: workspace!.name,
-          subtitle: '${device!.name} · ${workspace!.pathHint}',
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: onCreateSession,
-          icon: const Icon(Icons.add_comment_outlined),
-          label: const Text('新建 Codex 会话'),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          '历史会话',
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        const SizedBox(height: 8),
-        if (sessions.isEmpty)
-          const _EmptyPanel(
-            icon: Icons.forum_outlined,
-            title: '暂无可显示的历史会话',
-            subtitle: '你仍然可以从上方新建一个会话。',
-          )
-        else
-          ...sessions.map(
-            (session) => Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: _InfoCard(
-                onTap: () => onSessionSelected(session.sessionId),
-                title: session.title,
-                subtitle: session.updatedAtLabel == null
-                    ? '历史 session'
-                    : '最近更新 ${session.updatedAtLabel}',
-                trailing: _SessionStatusIndicator(
-                  session: session,
-                  selected: session.sessionId == selectedSessionId,
-                ),
-                chips: ['历史 session', 'cwd 匹配'],
-              ),
-            ),
-          ),
-      ],
     );
   }
 }
@@ -1162,7 +1125,7 @@ class _ConsolePage extends StatelessWidget {
       return const _EmptyState(
         icon: Icons.forum_outlined,
         title: '未选择会话',
-        subtitle: '请返回会话页重新选择。',
+        subtitle: '请返回项目页重新选择。',
       );
     }
 
@@ -1449,6 +1412,217 @@ class _InfoCard extends StatelessWidget {
   }
 }
 
+class _WorkspaceDrawerCard extends StatelessWidget {
+  const _WorkspaceDrawerCard({
+    required this.workspace,
+    required this.expanded,
+    required this.selected,
+    required this.selectedSessionId,
+    required this.onToggle,
+    required this.onCreateSession,
+    required this.onSessionSelected,
+  });
+
+  final WorkspaceInfo workspace;
+  final bool expanded;
+  final bool selected;
+  final String? selectedSessionId;
+  final VoidCallback onToggle;
+  final VoidCallback onCreateSession;
+  final ValueChanged<String> onSessionSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: colorScheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: selected
+                ? colorScheme.primary.withValues(alpha: 0.35)
+                : colorScheme.outlineVariant,
+          ),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          children: [
+            InkWell(
+              onTap: onToggle,
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                workspace.name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                workspace.pathHint,
+                                style: TextStyle(
+                                  color: colorScheme.onSurfaceVariant,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            _WorkspaceStatusIndicator(workspace: workspace),
+                            const SizedBox(height: 10),
+                            Icon(
+                              expanded
+                                  ? Icons.keyboard_arrow_up_rounded
+                                  : Icons.keyboard_arrow_down_rounded,
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 7,
+                      runSpacing: 7,
+                      children: [
+                        _SmallChip('${workspace.sessions.length} 个历史会话'),
+                        if (workspace.runningSessionCount > 0)
+                          _SmallChip('${workspace.runningSessionCount} 个运行中'),
+                        _SmallChip(expanded ? '点击收起' : '点击展开'),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (expanded) ...[
+              Divider(
+                height: 1,
+                color: colorScheme.outlineVariant.withValues(alpha: 0.9),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        onPressed: onCreateSession,
+                        icon: const Icon(Icons.add_comment_outlined, size: 18),
+                        label: const Text('新建会话'),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    if (workspace.sessions.isEmpty)
+                      const _EmptyPanel(
+                        icon: Icons.forum_outlined,
+                        title: '暂无历史会话',
+                        subtitle: '可以直接在这个项目下新建一个会话。',
+                      )
+                    else
+                      ...workspace.sessions.map(
+                        (session) => Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: _SessionDrawerTile(
+                            session: session,
+                            selected:
+                                session.sessionId == selectedSessionId,
+                            onTap: () => onSessionSelected(session.sessionId),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SessionDrawerTile extends StatelessWidget {
+  const _SessionDrawerTile({
+    required this.session,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final SessionInfo session;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected
+          ? colorScheme.primaryContainer.withValues(alpha: 0.38)
+          : colorScheme.surfaceContainerHighest.withValues(alpha: 0.36),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      session.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      session.updatedAtLabel == null
+                          ? '历史会话'
+                          : '最近更新 ${session.updatedAtLabel}',
+                      style: TextStyle(
+                        color: colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              _SessionStatusIndicator(session: session, selected: selected),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SessionStatusIndicator extends StatelessWidget {
   const _SessionStatusIndicator({required this.session, required this.selected});
 
@@ -1469,8 +1643,38 @@ class _SessionStatusIndicator extends StatelessWidget {
   }
 }
 
+class _WorkspaceStatusIndicator extends StatelessWidget {
+  const _WorkspaceStatusIndicator({required this.workspace});
+
+  final WorkspaceInfo workspace;
+
+  @override
+  Widget build(BuildContext context) {
+    if (workspace.runningSessionCount > 0) {
+      return _RunningPill(
+        label: workspace.runningSessionCount == 1
+            ? '1 个运行中'
+            : '${workspace.runningSessionCount} 个运行中',
+      );
+    }
+
+    if (workspace.failedSessionCount > 0) {
+      return _StatusPill(
+        label: workspace.failedSessionCount == 1
+            ? '1 个失败'
+            : '${workspace.failedSessionCount} 个失败',
+        positive: false,
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+}
+
 class _RunningPill extends StatelessWidget {
-  const _RunningPill();
+  const _RunningPill({this.label = '运行中'});
+
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -1482,10 +1686,10 @@ class _RunningPill extends StatelessWidget {
         color: background,
         borderRadius: BorderRadius.circular(99),
       ),
-      child: const Row(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
+          const SizedBox(
             width: 12,
             height: 12,
             child: CircularProgressIndicator(
@@ -1493,9 +1697,9 @@ class _RunningPill extends StatelessWidget {
               color: foreground,
             ),
           ),
-          SizedBox(width: 6),
+          const SizedBox(width: 6),
           Text(
-            '运行中',
+            label,
             style: TextStyle(
               color: foreground,
               fontSize: 12,
@@ -1829,6 +2033,16 @@ class WorkspaceInfo {
   final String name;
   final String pathHint;
   final List<SessionInfo> sessions;
+
+  int get runningSessionCount {
+    return sessions.where((session) => session.isRunning).length;
+  }
+
+  int get failedSessionCount {
+    return sessions
+        .where((session) => session.status == SessionRuntimeStatus.failed)
+        .length;
+  }
 
   WorkspaceInfo copyWithSessionStatus({
     required String sessionId,
