@@ -2,6 +2,14 @@ import http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { ClientRole, EventEnvelope, WorkspaceSummary, createEvent, parseEvent } from './protocol.js';
 
+type SessionRuntimeStatus = 'idle' | 'running' | 'failed';
+
+type SessionRuntime = {
+  status: SessionRuntimeStatus;
+  runningTurnId?: string;
+  lastStatusAt: string;
+};
+
 type Client = {
   id: string;
   role: ClientRole;
@@ -17,6 +25,7 @@ type DeviceState = {
   platform: string;
   status: 'online' | 'offline';
   workspaces: WorkspaceSummary[];
+  sessionRuntimeById: Map<string, SessionRuntime>;
   agent?: Client;
   lastSeenAt: string;
 };
@@ -66,6 +75,11 @@ wss.on('connection', (socket) => {
       return;
     }
 
+    if (event.type === 'device.snapshot.request') {
+      sendDeviceSnapshot(client.userId, socket);
+      return;
+    }
+
     routeEvent(client, event);
   });
 
@@ -108,6 +122,7 @@ function registerClient(socket: WebSocket, event: EventEnvelope): Client {
       platform: String(event.payload.platform ?? process.platform),
       status: 'online',
       workspaces: [],
+      sessionRuntimeById: new Map(),
       agent: client,
       lastSeenAt: new Date().toISOString(),
     };
@@ -151,6 +166,11 @@ function routeEvent(sender: Client, event: EventEnvelope): void {
 }
 
 function routeAppEvent(sender: Client, event: EventEnvelope): void {
+  if (event.type === 'device.snapshot.request') {
+    sendDeviceSnapshot(sender.userId, sender.socket);
+    return;
+  }
+
   if (!event.device_id) {
     send(sender.socket, createEvent('error', { message: 'device_id is required' }));
     return;
@@ -177,12 +197,18 @@ function routeAgentEvent(sender: Client, event: EventEnvelope): void {
 
   if (event.type === 'workspace.list' && device) {
     device.workspaces = Array.isArray(event.payload.workspaces)
-      ? (event.payload.workspaces as WorkspaceSummary[])
+      ? applySessionRuntime(event.payload.workspaces as WorkspaceSummary[], device.sessionRuntimeById)
       : [];
     broadcastToApps(sender.userId, createEvent('workspace.list', {
       device: publicDevice(device),
       workspaces: device.workspaces,
     }, { user_id: sender.userId, device_id: sender.deviceId }));
+    return;
+  }
+
+  if (event.type === 'session.status' && device) {
+    updateSessionRuntime(device, event);
+    broadcastToApps(sender.userId, event);
     return;
   }
 
@@ -195,6 +221,48 @@ function sendDeviceSnapshot(userId: string, socket: WebSocket): void {
     .map(publicDevice);
 
   send(socket, createEvent('device.snapshot', { devices: visibleDevices }, { user_id: userId }));
+}
+
+function updateSessionRuntime(device: DeviceState, event: EventEnvelope): void {
+  if (!event.session_id) {
+    return;
+  }
+
+  const status = parseSessionRuntimeStatus(event.payload.status);
+  const lastStatusAt = String(event.payload.updated_at ?? event.created_at);
+
+  device.sessionRuntimeById.set(event.session_id, {
+    status,
+    runningTurnId: status === 'running' ? event.turn_id : undefined,
+    lastStatusAt,
+  });
+  device.workspaces = applySessionRuntime(device.workspaces, device.sessionRuntimeById);
+}
+
+function parseSessionRuntimeStatus(value: unknown): SessionRuntimeStatus {
+  return value === 'running' || value === 'failed' ? value : 'idle';
+}
+
+function applySessionRuntime(
+  workspaces: WorkspaceSummary[],
+  runtimeById: Map<string, SessionRuntime>,
+): WorkspaceSummary[] {
+  return workspaces.map((workspace) => ({
+    ...workspace,
+    sessions: workspace.sessions?.map((session) => {
+      const runtime = runtimeById.get(session.session_id);
+      if (!runtime) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: runtime.status,
+        running_turn_id: runtime.runningTurnId,
+        last_status_at: runtime.lastStatusAt,
+      };
+    }),
+  }));
 }
 
 function publicDevice(device: DeviceState): Record<string, unknown> {

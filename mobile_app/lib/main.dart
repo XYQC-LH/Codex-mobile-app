@@ -4,10 +4,12 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 const String _backendWebSocketUrl = 'ws://103.143.81.22:8787/ws';
 const String _backendHealthUrl = 'http://103.143.81.22:8787/health';
+const String _uiStateStorageKey = 'codex_mobile_control.ui_state';
 
 void main() {
   runApp(const CodexMobileControlApp());
@@ -36,6 +38,32 @@ class CodexMobileControlApp extends StatelessWidget {
 
 enum _HomeStep { devices, projects, sessions, console }
 
+enum ConsoleLogRole { user, assistant, system }
+
+class ConsoleLogEntry {
+  const ConsoleLogEntry({required this.role, required this.text});
+
+  final ConsoleLogRole role;
+  final String text;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'role': role.name,
+      'text': text,
+    };
+  }
+
+  factory ConsoleLogEntry.fromJson(Map<String, dynamic> json) {
+    return ConsoleLogEntry(
+      role: ConsoleLogRole.values.firstWhere(
+        (item) => item.name == json['role']?.toString(),
+        orElse: () => ConsoleLogRole.system,
+      ),
+      text: json['text']?.toString() ?? '',
+    );
+  }
+}
+
 class ControlHomePage extends StatefulWidget {
   const ControlHomePage({super.key, this.autoConnect = true});
 
@@ -45,14 +73,17 @@ class ControlHomePage extends StatefulWidget {
   State<ControlHomePage> createState() => _ControlHomePageState();
 }
 
-class _ControlHomePageState extends State<ControlHomePage> {
+class _ControlHomePageState extends State<ControlHomePage>
+    with WidgetsBindingObserver {
   final TextEditingController _promptController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Timer? _latencyTimer;
+  Timer? _refreshTimer;
   _HomeStep _step = _HomeStep.devices;
+  bool _restoringState = true;
   bool _connected = false;
   bool _connecting = false;
   int? _latencyMs;
@@ -61,20 +92,27 @@ class _ControlHomePageState extends State<ControlHomePage> {
   String? _selectedWorkspaceId;
   String? _selectedSessionId;
   final List<DeviceInfo> _devices = <DeviceInfo>[];
-  final List<String> _logs = <String>[];
+  final List<ConsoleLogEntry> _logs = <ConsoleLogEntry>[];
   ApprovalRequest? _pendingApproval;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_restoreUiState());
     if (widget.autoConnect) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _connect());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startAutoRefresh();
+        unawaited(_connect(silent: true));
+      });
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _latencyTimer?.cancel();
+    _refreshTimer?.cancel();
     _subscription?.cancel();
     _channel?.sink.close();
     _promptController.dispose();
@@ -83,12 +121,36 @@ class _ControlHomePageState extends State<ControlHomePage> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startAutoRefresh();
+      _refreshConnection();
+      return;
+    }
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      _refreshTimer?.cancel();
+      _latencyTimer?.cancel();
+      _schedulePersistUiState();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final selectedDevice = _selectedDevice;
     final selectedWorkspace = _selectedWorkspace;
     final selectedSession = _selectedSession;
 
-    return Scaffold(
+    return PopScope(
+      canPop: _step == _HomeStep.devices,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _step != _HomeStep.devices) {
+          _goBack();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         leading: _step == _HomeStep.devices
             ? null
@@ -149,6 +211,7 @@ class _ControlHomePageState extends State<ControlHomePage> {
           ),
         },
       ),
+      ),
     );
   }
 
@@ -159,6 +222,74 @@ class _ControlHomePageState extends State<ControlHomePage> {
       _HomeStep.sessions => '选择会话',
       _HomeStep.console => '会话控制',
     };
+  }
+
+  Future<void> _restoreUiState() async {
+    final preferences = await SharedPreferences.getInstance();
+    final raw = preferences.getString(_uiStateStorageKey);
+    if (raw == null || raw.isEmpty) {
+      if (mounted) {
+        setState(() => _restoringState = false);
+      }
+      return;
+    }
+
+    try {
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final stepName = json['step']?.toString();
+      final logs = json['logs'];
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _step = _HomeStep.values.firstWhere(
+          (item) => item.name == stepName,
+          orElse: () => _HomeStep.devices,
+        );
+        _selectedDeviceId = json['selectedDeviceId']?.toString();
+        _selectedWorkspaceId = json['selectedWorkspaceId']?.toString();
+        _selectedSessionId = json['selectedSessionId']?.toString();
+        _logs
+          ..clear()
+          ..addAll(logs is List
+              ? logs
+                  .whereType<Map>()
+                  .map((item) => ConsoleLogEntry.fromJson(
+                        item.cast<String, dynamic>(),
+                      ))
+                  .where((item) => item.text.trim().isNotEmpty)
+              : const <ConsoleLogEntry>[]);
+        _loadingHistory = false;
+        _restoringState = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _restoringState = false);
+      }
+    }
+  }
+
+  Future<void> _persistUiState() async {
+    if (_restoringState) {
+      return;
+    }
+
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      _uiStateStorageKey,
+      jsonEncode({
+        'step': _step.name,
+        'selectedDeviceId': _selectedDeviceId,
+        'selectedWorkspaceId': _selectedWorkspaceId,
+        'selectedSessionId': _selectedSessionId,
+        'logs': _logs.take(80).map((item) => item.toJson()).toList(),
+      }),
+    );
+  }
+
+  void _schedulePersistUiState() {
+    unawaited(_persistUiState());
   }
 
   DeviceInfo? get _selectedDevice {
@@ -185,9 +316,15 @@ class _ControlHomePageState extends State<ControlHomePage> {
         _promptController.text.trim().isNotEmpty;
   }
 
-  Future<void> _connect() async {
+  Future<void> _connect({bool silent = false}) async {
+    if (_connecting) {
+      return;
+    }
+
     _disconnect(updateState: false);
-    _appendLog('正在连接服务器...');
+    if (!silent) {
+      _appendLog('正在连接服务器...', role: ConsoleLogRole.system);
+    }
     final channel = WebSocketChannel.connect(Uri.parse(_backendWebSocketUrl));
     _channel = channel;
     _subscription = channel.stream.listen(
@@ -203,7 +340,9 @@ class _ControlHomePageState extends State<ControlHomePage> {
         }
       },
       onError: (Object error) {
-        _appendLog('连接错误：$error');
+        if (!silent) {
+          _appendLog('连接错误：$error', role: ConsoleLogRole.system);
+        }
         _latencyTimer?.cancel();
         if (mounted) {
           setState(() {
@@ -223,7 +362,9 @@ class _ControlHomePageState extends State<ControlHomePage> {
 
     try {
       await channel.ready.timeout(const Duration(seconds: 8));
-      _appendLog('服务器已连接，正在注册 App...');
+      if (!silent) {
+        _appendLog('服务器已连接，正在注册 App...', role: ConsoleLogRole.system);
+      }
       _send(
         EventEnvelope(
           type: 'client.hello',
@@ -235,7 +376,9 @@ class _ControlHomePageState extends State<ControlHomePage> {
         ),
       );
     } catch (error) {
-      _appendLog('连接失败：$error');
+      if (!silent) {
+        _appendLog('连接失败：$error', role: ConsoleLogRole.system);
+      }
       _disconnect();
     }
   }
@@ -253,6 +396,25 @@ class _ControlHomePageState extends State<ControlHomePage> {
         _connecting = false;
         _latencyMs = null;
       });
+    }
+  }
+
+  void _startAutoRefresh() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _refreshConnection(),
+    );
+  }
+
+  void _refreshConnection() {
+    if (_connecting) {
+      return;
+    }
+
+    if (!_connected) {
+      unawaited(_connect(silent: true));
+      return;
     }
   }
 
@@ -298,6 +460,7 @@ class _ControlHomePageState extends State<ControlHomePage> {
         _HomeStep.devices => _HomeStep.devices,
       };
     });
+    _schedulePersistUiState();
   }
 
   void _openDevice(String deviceId) {
@@ -307,6 +470,7 @@ class _ControlHomePageState extends State<ControlHomePage> {
       _selectedSessionId = null;
       _step = _HomeStep.projects;
     });
+    _schedulePersistUiState();
   }
 
   void _openWorkspace(String workspaceId) {
@@ -315,6 +479,7 @@ class _ControlHomePageState extends State<ControlHomePage> {
       _selectedSessionId = null;
       _step = _HomeStep.sessions;
     });
+    _schedulePersistUiState();
   }
 
   void _openSession(String sessionId) {
@@ -323,9 +488,14 @@ class _ControlHomePageState extends State<ControlHomePage> {
       _step = _HomeStep.console;
       _logs
         ..clear()
-        ..add('正在加载历史对话...');
+        ..add(const ConsoleLogEntry(
+          role: ConsoleLogRole.system,
+          text: '正在加载历史对话...',
+        ));
       _loadingHistory = true;
     });
+    _scrollToBottom(jump: true);
+    _schedulePersistUiState();
     _requestSessionHistory(sessionId);
   }
 
@@ -342,7 +512,8 @@ class _ControlHomePageState extends State<ControlHomePage> {
       _logs.clear();
       _loadingHistory = false;
     });
-    _appendLog('已为当前项目创建新会话。');
+    _appendLog('已为当前项目创建新会话。', role: ConsoleLogRole.system);
+    _schedulePersistUiState();
   }
 
   void _requestSessionHistory(String sessionId) {
@@ -368,7 +539,7 @@ class _ControlHomePageState extends State<ControlHomePage> {
     }
 
     final turnId = _newId('turn');
-    _appendLog('你：$prompt');
+    _appendLog(prompt, role: ConsoleLogRole.user);
     _send(
       EventEnvelope(
         type: 'turn.start',
@@ -381,6 +552,7 @@ class _ControlHomePageState extends State<ControlHomePage> {
     );
     _promptController.clear();
     setState(() {});
+    _schedulePersistUiState();
   }
 
   void _handleRawMessage(dynamic raw) {
@@ -396,7 +568,6 @@ class _ControlHomePageState extends State<ControlHomePage> {
           _connected = true;
           _connecting = false;
         });
-        _appendLog('App 已注册，正在读取设备和项目...');
         _startLatencyProbe();
       case 'device.snapshot':
         _replaceDevices(payload['devices']);
@@ -410,8 +581,10 @@ class _ControlHomePageState extends State<ControlHomePage> {
         }
       case 'session.history':
         _replaceSessionHistory(payload);
+      case 'session.status':
+        _applySessionStatus(data, payload);
       case 'turn.delta':
-        _appendLog('Codex：${payload['text'] ?? ''}');
+        _appendAssistantDelta('${payload['text'] ?? ''}');
       case 'approval.requested':
         setState(() => _pendingApproval = ApprovalRequest.fromJson(payload));
         _appendLog('审批请求：${payload['summary'] ?? '需要审批'}');
@@ -420,6 +593,9 @@ class _ControlHomePageState extends State<ControlHomePage> {
       case 'turn.failed':
         _appendLog('失败：${payload['summary'] ?? 'turn failed'}');
       case 'error':
+        if (payload['message']?.toString() == 'device_id is required') {
+          return;
+        }
         _appendLog('错误：${payload['message'] ?? 'unknown error'}');
       default:
         _appendLog('事件 $type');
@@ -433,22 +609,33 @@ class _ControlHomePageState extends State<ControlHomePage> {
       return;
     }
 
-    final lines = rawMessages
+    final entries = rawMessages
         .whereType<Map>()
         .map((item) {
-          final role = item['role']?.toString() == 'user' ? '你' : 'Codex';
+          final role = item['role']?.toString() == 'user'
+              ? ConsoleLogRole.user
+              : ConsoleLogRole.assistant;
           final text = item['text']?.toString().trim() ?? '';
-          return text.isEmpty ? '' : '$role：$text';
+          return text.isEmpty ? null : ConsoleLogEntry(role: role, text: text);
         })
-        .where((line) => line.isNotEmpty)
+        .whereType<ConsoleLogEntry>()
         .toList();
 
     setState(() {
       _logs
         ..clear()
-        ..addAll(lines.isEmpty ? ['这个历史会话没有可展示的对话内容。'] : lines);
+        ..addAll(entries.isEmpty
+            ? const [
+                ConsoleLogEntry(
+                  role: ConsoleLogRole.system,
+                  text: '这个历史会话没有可展示的对话内容。',
+                ),
+              ]
+            : entries);
       _loadingHistory = false;
     });
+    _scrollToBottom(jump: true);
+    _schedulePersistUiState();
   }
 
   void _replaceDevices(dynamic value) {
@@ -465,14 +652,9 @@ class _ControlHomePageState extends State<ControlHomePage> {
           ),
         );
 
-      if (_selectedDeviceId != null &&
-          !_devices.any((item) => item.deviceId == _selectedDeviceId)) {
-        _selectedDeviceId = null;
-        _selectedWorkspaceId = null;
-        _selectedSessionId = null;
-        _step = _HomeStep.devices;
-      }
+      _reconcileSelectedContext();
     });
+    _schedulePersistUiState();
   }
 
   void _upsertDevice(DeviceInfo device) {
@@ -485,7 +667,47 @@ class _ControlHomePageState extends State<ControlHomePage> {
       } else {
         _devices.add(device);
       }
+      _reconcileSelectedContext();
     });
+    _schedulePersistUiState();
+  }
+
+  void _applySessionStatus(
+    Map<String, dynamic> envelope,
+    Map<String, dynamic> payload,
+  ) {
+    final deviceId = envelope['device_id']?.toString();
+    final workspaceId = envelope['workspace_id']?.toString();
+    final sessionId = envelope['session_id']?.toString();
+    if (deviceId == null || workspaceId == null || sessionId == null) {
+      return;
+    }
+
+    final status = SessionRuntimeStatus.fromWire(payload['status']);
+    final runningTurnId = payload['turn_id']?.toString() ??
+        envelope['turn_id']?.toString();
+    final lastStatusAt = payload['updated_at']?.toString() ??
+        envelope['created_at']?.toString();
+
+    setState(() {
+      final deviceIndex = _devices.indexWhere(
+        (item) => item.deviceId == deviceId,
+      );
+      if (deviceIndex < 0) {
+        return;
+      }
+
+      _devices[deviceIndex] = _devices[deviceIndex].copyWithSessionStatus(
+        workspaceId: workspaceId,
+        sessionId: sessionId,
+        status: status,
+        runningTurnId: status == SessionRuntimeStatus.running
+            ? runningTurnId
+            : null,
+        lastStatusAt: lastStatusAt,
+      );
+    });
+    _schedulePersistUiState();
   }
 
   void _send(EventEnvelope event) {
@@ -512,19 +734,111 @@ class _ControlHomePageState extends State<ControlHomePage> {
     );
     _appendLog('${approved ? '已允许' : '已拒绝'}：${request.summary}');
     setState(() => _pendingApproval = null);
+    _schedulePersistUiState();
   }
 
-  void _appendLog(String line) {
-    setState(() => _logs.add(line.trimRight()));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
+  void _appendLog(
+    String line, {
+    ConsoleLogRole role = ConsoleLogRole.system,
+  }) {
+    final text = line.trimRight();
+    if (text.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      if (_isDuplicateLastLog(role, text)) {
+        return;
+      }
+
+      _logs.add(ConsoleLogEntry(role: role, text: text));
+    });
+    _scrollToBottom();
+    _schedulePersistUiState();
+  }
+
+  void _appendAssistantDelta(String text) {
+    if (text.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      final lastIndex = _logs.length - 1;
+      if (lastIndex >= 0 && _logs[lastIndex].role == ConsoleLogRole.assistant) {
+        final previous = _logs[lastIndex].text;
+        _logs[lastIndex] = ConsoleLogEntry(
+          role: ConsoleLogRole.assistant,
+          text: '$previous$text'.trimRight(),
         );
+      } else {
+        _logs.add(ConsoleLogEntry(
+          role: ConsoleLogRole.assistant,
+          text: text.trimRight(),
+        ));
       }
     });
+    _scrollToBottom();
+    _schedulePersistUiState();
+  }
+
+  void _reconcileSelectedContext() {
+    final selectedDevice = _selectedDevice;
+    if (_selectedDeviceId != null && selectedDevice == null) {
+      return;
+    }
+
+    final selectedWorkspace = _selectedWorkspace;
+    if (_selectedWorkspaceId != null && selectedWorkspace == null) {
+      _selectedWorkspaceId = null;
+      _selectedSessionId = null;
+      if (_step.index > _HomeStep.projects.index) {
+        _step = _HomeStep.projects;
+      }
+      return;
+    }
+
+    if (_selectedSessionId != null &&
+        selectedWorkspace != null &&
+        !_selectedWorkspaceHasSession(_selectedSessionId!)) {
+      return;
+    }
+  }
+
+  bool _selectedWorkspaceHasSession(String sessionId) {
+    return _selectedWorkspace?.sessions
+            .any((item) => item.sessionId == sessionId) ??
+        false;
+  }
+
+  void _scrollToBottom({bool jump = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        final target = _scrollController.position.maxScrollExtent;
+        if (jump) {
+          _scrollController.jumpTo(target);
+        } else {
+          _scrollController.animateTo(
+            target,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+          );
+        }
+      }
+    });
+  }
+
+  bool _isDuplicateLastLog(ConsoleLogRole role, String text) {
+    if (_logs.isEmpty) {
+      return false;
+    }
+
+    final previous = _logs.last;
+    return previous.role == role &&
+        _normalizeLogText(previous.text) == _normalizeLogText(text);
+  }
+
+  String _normalizeLogText(String value) {
+    return value.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 }
 
@@ -798,9 +1112,9 @@ class _SessionSelectionPage extends StatelessWidget {
                 subtitle: session.updatedAtLabel == null
                     ? '历史 session'
                     : '最近更新 ${session.updatedAtLabel}',
-                trailing: _StatusPill(
-                  label: session.sessionId == selectedSessionId ? '当前' : '可续写',
-                  positive: true,
+                trailing: _SessionStatusIndicator(
+                  session: session,
+                  selected: session.sessionId == selectedSessionId,
                 ),
                 chips: ['历史 session', 'cwd 匹配'],
               ),
@@ -831,7 +1145,7 @@ class _ConsolePage extends StatelessWidget {
   final DeviceInfo? device;
   final WorkspaceInfo? workspace;
   final SessionInfo? session;
-  final List<String> logs;
+  final List<ConsoleLogEntry> logs;
   final bool loadingHistory;
   final ApprovalRequest? pendingApproval;
   final TextEditingController promptController;
@@ -858,7 +1172,9 @@ class _ConsolePage extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: _ContextHeader(
             title: workspace!.name,
-            subtitle: session?.title ?? '新建会话 · ${device!.name}',
+            subtitle: session?.isRunning == true
+                ? '${session?.title ?? '新建会话'} · 运行中'
+                : session?.title ?? '新建会话 · ${device!.name}',
           ),
         ),
         Expanded(
@@ -882,16 +1198,8 @@ class _ConsolePage extends StatelessWidget {
                     controller: scrollController,
                     padding: const EdgeInsets.all(12),
                     itemCount: logs.length,
-                    itemBuilder: (context, index) => Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        logs[index],
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
+                    itemBuilder: (context, index) =>
+                        _ConsoleBubble(entry: logs[index]),
                   ),
           ),
         ),
@@ -935,6 +1243,95 @@ class _ConsolePage extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ConsoleBubble extends StatelessWidget {
+  const _ConsoleBubble({required this.entry});
+
+  final ConsoleLogEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isUser = entry.role == ConsoleLogRole.user;
+    final isSystem = entry.role == ConsoleLogRole.system;
+
+    if (isSystem) {
+      return Align(
+        alignment: Alignment.center,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.8),
+            borderRadius: BorderRadius.circular(99),
+          ),
+          child: Text(
+            entry.text,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: colorScheme.onSurfaceVariant,
+              fontSize: 12,
+              height: 1.35,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.74,
+        ),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: isUser ? colorScheme.primary : colorScheme.surface,
+            border: Border.all(
+              color: isUser
+                  ? colorScheme.primary
+                  : colorScheme.outlineVariant,
+            ),
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(8),
+              topRight: const Radius.circular(8),
+              bottomLeft: Radius.circular(isUser ? 8 : 2),
+              bottomRight: Radius.circular(isUser ? 2 : 8),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                isUser ? '你' : 'Codex',
+                style: TextStyle(
+                  color: isUser
+                      ? colorScheme.onPrimary.withValues(alpha: 0.72)
+                      : colorScheme.primary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                entry.text,
+                style: TextStyle(
+                  color: isUser ? colorScheme.onPrimary : colorScheme.onSurface,
+                  fontSize: 14,
+                  height: 1.45,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1047,6 +1444,65 @@ class _InfoCard extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _SessionStatusIndicator extends StatelessWidget {
+  const _SessionStatusIndicator({required this.session, required this.selected});
+
+  final SessionInfo session;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    if (session.isRunning) {
+      return const _RunningPill();
+    }
+
+    if (session.status == SessionRuntimeStatus.failed) {
+      return const _StatusPill(label: '失败', positive: false);
+    }
+
+    return _StatusPill(label: selected ? '当前' : '可续写', positive: true);
+  }
+}
+
+class _RunningPill extends StatelessWidget {
+  const _RunningPill();
+
+  @override
+  Widget build(BuildContext context) {
+    const foreground = Color(0xFF1D4ED8);
+    const background = Color(0xFFEFF6FF);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(99),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: foreground,
+            ),
+          ),
+          SizedBox(width: 6),
+          Text(
+            '运行中',
+            style: TextStyle(
+              color: foreground,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1312,6 +1768,34 @@ class DeviceInfo {
     return _formatTimestamp(lastSeenAt) ?? '--';
   }
 
+  DeviceInfo copyWithSessionStatus({
+    required String workspaceId,
+    required String sessionId,
+    required SessionRuntimeStatus status,
+    String? runningTurnId,
+    String? lastStatusAt,
+  }) {
+    return DeviceInfo(
+      deviceId: deviceId,
+      name: name,
+      platform: platform,
+      status: this.status,
+      workspaces: workspaces.map((workspace) {
+        if (workspace.workspaceId != workspaceId) {
+          return workspace;
+        }
+
+        return workspace.copyWithSessionStatus(
+          sessionId: sessionId,
+          status: status,
+          runningTurnId: runningTurnId,
+          lastStatusAt: lastStatusAt,
+        );
+      }).toList(),
+      lastSeenAt: lastSeenAt,
+    );
+  }
+
   factory DeviceInfo.fromJson(Map<String, dynamic> json) {
     final rawWorkspaces = json['workspaces'];
     return DeviceInfo(
@@ -1346,6 +1830,47 @@ class WorkspaceInfo {
   final String pathHint;
   final List<SessionInfo> sessions;
 
+  WorkspaceInfo copyWithSessionStatus({
+    required String sessionId,
+    required SessionRuntimeStatus status,
+    String? runningTurnId,
+    String? lastStatusAt,
+  }) {
+    var found = false;
+    final updatedSessions = sessions.map((session) {
+      if (session.sessionId != sessionId) {
+        return session;
+      }
+
+      found = true;
+      return session.copyWithStatus(
+        status: status,
+        runningTurnId: runningTurnId,
+        lastStatusAt: lastStatusAt,
+      );
+    }).toList();
+
+    if (!found) {
+      updatedSessions.insert(
+        0,
+        SessionInfo(
+          sessionId: sessionId,
+          title: '新建会话',
+          status: status,
+          runningTurnId: runningTurnId,
+          lastStatusAt: lastStatusAt,
+        ),
+      );
+    }
+
+    return WorkspaceInfo(
+      workspaceId: workspaceId,
+      name: name,
+      pathHint: pathHint,
+      sessions: updatedSessions,
+    );
+  }
+
   factory WorkspaceInfo.fromJson(Map<String, dynamic> json) {
     final rawSessions = json['sessions'];
     return WorkspaceInfo(
@@ -1369,20 +1894,59 @@ class SessionInfo {
     required this.sessionId,
     required this.title,
     this.updatedAt,
+    this.status = SessionRuntimeStatus.idle,
+    this.runningTurnId,
+    this.lastStatusAt,
   });
 
   final String sessionId;
   final String title;
   final String? updatedAt;
+  final SessionRuntimeStatus status;
+  final String? runningTurnId;
+  final String? lastStatusAt;
 
   String? get updatedAtLabel => _formatTimestamp(updatedAt);
+  bool get isRunning => status == SessionRuntimeStatus.running;
+
+  SessionInfo copyWithStatus({
+    required SessionRuntimeStatus status,
+    String? runningTurnId,
+    String? lastStatusAt,
+  }) {
+    return SessionInfo(
+      sessionId: sessionId,
+      title: title,
+      updatedAt: updatedAt,
+      status: status,
+      runningTurnId: runningTurnId,
+      lastStatusAt: lastStatusAt,
+    );
+  }
 
   factory SessionInfo.fromJson(Map<String, dynamic> json) {
     return SessionInfo(
       sessionId: json['session_id']?.toString() ?? '',
       title: json['title']?.toString() ?? '未命名会话',
       updatedAt: json['updated_at']?.toString(),
+      status: SessionRuntimeStatus.fromWire(json['status']),
+      runningTurnId: json['running_turn_id']?.toString(),
+      lastStatusAt: json['last_status_at']?.toString(),
     );
+  }
+}
+
+enum SessionRuntimeStatus {
+  idle,
+  running,
+  failed;
+
+  static SessionRuntimeStatus fromWire(Object? value) {
+    return switch (value?.toString()) {
+      'running' => SessionRuntimeStatus.running,
+      'failed' => SessionRuntimeStatus.failed,
+      _ => SessionRuntimeStatus.idle,
+    };
   }
 }
 

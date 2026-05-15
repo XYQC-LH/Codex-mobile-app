@@ -144,11 +144,14 @@ async function handleTurn(event: EventEnvelope): Promise<void> {
   const workspace = resolveWorkspace(event.workspace_id);
 
   if (!workspace) {
+    publishSessionStatus(ids, 'failed');
     send(createEvent('turn.failed', {
       summary: 'Workspace is not allowed on this device.',
     }, ids));
     return;
   }
+
+  publishSessionStatus(ids, 'running');
 
   if (codexMode !== 'mock') {
     try {
@@ -160,6 +163,7 @@ async function handleTurn(event: EventEnvelope): Promise<void> {
         emitEvent: (codexEvent) => forwardCodexEvent(codexEvent, ids),
       });
     } catch (error) {
+      publishSessionStatus(ids, 'failed');
       send(createEvent('turn.failed', {
         summary: error instanceof Error ? error.message : String(error),
       }, ids));
@@ -190,8 +194,20 @@ async function handleTurn(event: EventEnvelope): Promise<void> {
   }
 
   await wait(350);
+  publishSessionStatus(ids, 'idle');
   send(createEvent('turn.completed', {
     summary: '模拟任务已完成。',
+  }, ids));
+}
+
+function publishSessionStatus(
+  ids: Omit<EventEnvelope, 'event_id' | 'type' | 'created_at' | 'payload'>,
+  status: 'idle' | 'running' | 'failed',
+): void {
+  send(createEvent('session.status', {
+    status,
+    turn_id: ids.turn_id,
+    updated_at: new Date().toISOString(),
   }, ids));
 }
 
@@ -220,10 +236,12 @@ function forwardCodexEvent(
   }
 
   if (codexEvent.type === 'failed') {
+    publishSessionStatus(ids, 'failed');
     send(createEvent('turn.failed', { summary: codexEvent.message }, ids));
     return;
   }
 
+  publishSessionStatus(ids, 'idle');
   send(createEvent('turn.completed', { summary: codexEvent.summary }, ids));
 }
 
@@ -416,7 +434,26 @@ function loadSessionHistory(sessionId: string): SessionHistoryMessage[] {
     }
   }
 
-  return messages.slice(-40);
+  return dedupeAdjacentHistoryMessages(messages).slice(-40);
+}
+
+function dedupeAdjacentHistoryMessages(messages: SessionHistoryMessage[]): SessionHistoryMessage[] {
+  const result: SessionHistoryMessage[] = [];
+
+  for (const message of messages) {
+    const previous = result.at(-1);
+    if (previous && previous.role === message.role && normalizeMessageText(previous.text) === normalizeMessageText(message.text)) {
+      continue;
+    }
+
+    result.push(message);
+  }
+
+  return result;
+}
+
+function normalizeMessageText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }
 
 function findRolloutPathForSession(sessionId: string): string | undefined {

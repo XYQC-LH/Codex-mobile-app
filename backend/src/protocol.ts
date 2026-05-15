@@ -25,6 +25,9 @@ export type SessionSummary = {
   session_id: string;
   title: string;
   updated_at?: string;
+  status?: 'idle' | 'running' | 'failed';
+  running_turn_id?: string;
+  last_status_at?: string;
 };
 
 export function createEvent<TPayload>(
